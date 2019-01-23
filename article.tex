@@ -1,0 +1,1503 @@
+\documentclass[12pt]{spieman}  % 12pt font required by SPIE;
+%\documentclass[a4paper,12pt]{spieman}  % use this instead for A4 paper
+\usepackage{amsmath,amsfonts,amssymb}
+\usepackage{graphicx}
+\usepackage{setspace}
+\usepackage{tocloft}
+\usepackage{listings}
+\lstset{
+	numbers=left,
+    xleftmargin=2em,
+    xrightmargin=1em,
+	tabsize=4,
+	rulecolor=,
+	basicstyle=\scriptsize,
+    aboveskip={1.5\baselineskip},
+    columns=fixed,
+    showstringspaces=false,
+    extendedchars=true,
+    breaklines=true,
+    prebreak = \raisebox{0ex}[0ex][0ex]{\ensuremath{\hookleftarrow}},
+    frame=0L,
+    showtabs=false,
+    showspaces=false,
+    showstringspaces=false,
+    identifierstyle=\ttfamily,
+    keywordstyle=\color[rgb]{0,0,1},
+    commentstyle=\color[rgb]{0.133,0.545,0.133},
+    stringstyle=\color[rgb]{0.627,0.126,0.941},
+    rulecolor=\color{black},
+}
+
+\title{Building an ARM-based Datacenter}
+
+\author[a]{Taylor Chien}
+\affil[a]{SUNY Polytechnic Institute, Computer Science Department, 100 Horatio Street, Utica, NY, 13502}
+
+\renewcommand{\cftdotsep}{\cftnodots}
+\cftpagenumbersoff{figure}
+\cftpagenumbersoff{table} 
+\begin{document} 
+\maketitle
+
+\begin{abstract}
+The ARM CPU is becoming more prevalent as devices are shrinking and become embedded in everything from medical devices to toasters. However, Linux for ARM is still in the very early stages of release, with many different issues, challenges, and shortcomings.\\
+
+In order to test what level of service commodity ARM devices have, I decided to build a small data center with these devices. This included building services usually found in large businesses, such as LDAP, DNS, Mail, and certain web applications such as Roundcube webmail, ownCloud storage, and Drupal content management.
+\end{abstract}
+
+\section{Introduction}
+\label{sec:intro}
+ARM is a low power, open-source CPU architecture that is most commonly found in smartphones, embedded devices, and IoT systems. In the past, ARM was seen as an architecture that could usurp Intel, the king of high-end server processors, and take over datacenters. However, with Intel continuing to advance, ARM research divided between the licensees, and server-grade ARM processors relatively hard to find, Intel has managed to stay in the Datacenter for now, although Qualcomm and Cavium have started edging in, targeting multi-threaded workloads with their high core-count, low-power chips.\\
+
+At the other end of the spectrum, consumer devices, along with archive and lightweight servers have begun to see an influx of ARM devices. Consumer-grade Network Attached Storage (NAS) units made by companies such as QNAP, Synology, and Netgear all use ARM for their devices. Most Chromebooks use ARM as well. Even a few home routers and some enterprise edge equipment uses ARM.\\
+
+So far, the most popular use for ARM by far has been in IoT and embedded systems. The most successful implementation of this is the Raspberry Pi and its sequels. This small 35 computer developed by a British non-for-profit, the Raspberry Pi was such a hit that when their limited run of the extremely small Zero was put up for sale, it sold out from most retailers in hours. Over a million Raspberry Pis have been sold so far, and the device has even made it on board the ISS as part of public research projects.\\
+
+The Raspberry Pi isn’t alone anymore. With some of the devices out there containing the same CPUs that run NASs, routers, and laptops, why haven't we heard of low cost ARM datacenters or computational clusters?\\
+
+I wanted to understand why this hadn’t been done before, or if it was even possible. ARM is not an expensive platform or even very different than working with a normal computer. Most modern Linux and BSD operating systems support some variation of ARM, and even Microsoft has a platform that supports the Raspberry Pi and Minnowboard.\\
+
+\section{Literature Review}
+\label{sec:lit-rev}
+
+% JOSH NOTE: Somthing like this:
+The original inspiration for this project cam from Jeff Geerling's Raspberry Pi Dramble\cite{geerlingdramble}, where he uses Ansible to set up a small cluster of Raspberry Pis with Ansible. He had a fully redundant cluster of Raspberry Pis, with a load balancer, web servers, and a fail-over enabled MySQL server.\\
+
+Another inspiration came when searching for ARM-powered enterprise devices, such as Cavium's Thunder-X chips in Gigabyte servers. In the article I found, Intel bought the Thunder-X version of the same server that their Xeon chips run in and ran benchmarks comparing the two.\cite{morganarmxeon}\\
+
+ARM and Intel's x86 are by definition different architectures, and what the tests showed was in what areas each excels. In multi-threaded workloads, the ARM chips were better, but for time-sensitive or latency-sensitive tasks, the x86 server won, since ARM doesn't have a layer 3 cache.\\
+
+Towards the end of the article, the author lists the reason that ARM isn't as fast; Intel has been pushing for usability, adding features and technologies that boost performance and features, such as Thunderbolt, DDR4 support, L3 cache, better single-core performance, core sharing, Hyperthreading (semi-virtual CPU cores). ARM on the other hand has been fixing their base features and trying to conglomerate their fractured platform into a more solid competitor.\\
+
+For this paper, I needed to set up an SQL server, which is discussed more in Section \ref{subsubsec:sql} and Section \ref{subsubsec:sql-config}. However, I encountered frequent issues and needless complexity. At the end of the project, I found that instead of MySQL, I could have used MariaDB instead, since both Drupal and ownCloud were compatible. MariaDB is the spiritual successor to MySQL, and has a more robust and bug-free clustering protocol\cite{hullsql}. This would have been a much welcome alternative to MySQL.
+
+\section{Methods and Materials}
+\label{sec:met-mat}
+\subsection{Device Setup}
+\label{subsec:dev-setup}
+For this test, multiple different ARM devices were needed. While a homogeneous solution would have been preferred, the specialty of ARM is shaping the device to fit the purpose. Finding different devices that were suited for different purposes was simply a matter of looking at what they had been created to do. Devices like the Cubieboard 3 (also known as the CubieTruck) were obviously meant to be used with SATA devices since they came with a separate PCB specifically for powering 3.5" Hard Drives. On the other hand, devices like the NanoPi Neo were obviously
+meant for IoT or embedded systems, since they have no video output and no GPU.\\
+
+These devices will need to run several services, including DNS, LDAP, Load balancing web servers, SQL, VPN, Cold and Hot Storage, Email, GlusterFS, NFS, and OpenVPN. The web services that will be set up are ownCloud for storage, Roundcube for webmail, and Drupal for the main website. Hot Storage will be handled by NFS on GlusterFS, while Cold Storage will be handled by NFS on an archive disk.\\
+
+\begin{table}[ht]
+\caption{Comparison of ARM Devices} 
+\label{tab:device-analysis}
+\begin{center}       
+\begin{tabular}{|l|l|l|l|l|l|}
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Device & Quantity & CPU Cores & RAM (MB) & Ethernet (Mb/s) & Cost (USD) \\
+\hline\hline
+\rule[-1ex]{0pt}{3.5ex}  Banana Pi M1 & 2 & 2 & 1024 & 1000 & \$35  \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Cubieboard 3 & 1 & 2 & 2048 & 1000 & \$99  \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Raspberry Pi 2 & 1 & 4 & 1024 & 100 & \$25 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Raspberry Pi 3 & 5 & 4 & 1024 & 100 & \$35 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  NanoPi Neo & 2 & 4 & 512 & 100 & \$10      \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Odroid XU4 & 2 & 8 & 2048 & 1000 & \$75    \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Orange Pi One & 2 & 4 & 512 & 100 & \$15   \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  PINE64 2GB & 1 & 4 & 2048 & 1000 & \$29    \\
+\hline
+\rule[-1ex]{0pt}{3.5ex}  Udoo Quad & 2 & 4 & 1024 & 1000 & \$135    \\
+\hline
+\end{tabular}
+\end{center}
+\end{table} 
+
+One type of device (ie. Raspberry Pi 3, BananaPi M1, etc.) will be assigned a service to run across all of the devices of its type. This will allow for redundancy if there are multiple devices, and will allow for services to be built on homogeneous hardware instead of per-device, eliminating issues with operating system or hardware incompatibility.\\
+
+In order to assign services, the devices need their strengths and weaknesses assessed. Some services will work well with some hardware configurations, and matching those recomendations will improve performance. For example, SQL servers like MySQL or MariaDB use quite a bit of RAM, so choosing a device with more will help its performance. DNS servers usually perform better with more CPU cores for their search algorithms and Web servers usually need a bit of both, along with decent network speeds.
+
+\subsection{Device Assignments}
+\label{subsec:dev-assignment}
+From the table above, we can see that the two Odroid XU4s clearly have the best combination of RAM, CPU, and Ethernet potential. Also, since I have two of them, I can use them as redundant failovers for one of the services. Two other devices, the Cubieboard 3 and the PINE64, share the high RAM count as well, but they are only single boards, so cannot be made redundant with a mirror device.\\
+
+Not included on the charts above are those devices with SATA. The Banana Pi M1s, Cubieboard 3, and Udoo Quads all have Gigabit Ethernet and SATA, making them good candidates for storage. The most likely candidates would be the Udoo Quads, since they have the higher core count and a gigabyte of RAM. However, the Cubieboard comes with an add-on circuit that powers both the device and a 3.5” Hard Drive, which the other devices can’t do on their own.\\
+
+On the lower end of the spectrum sit the Orange Pi Ones and NanoPi Neos. Each device has a low amount of RAM and also only Fast Ethernet, limiting their use as storage or other high-use service.\\
+
+The Raspberry Pis sit in the middle of the pack, with their gigabyte of RAM, quad-core CPU, and Fast Ethernet. However, since there are so many of them, they can easily run a load-balanced service.
+
+\subsubsection{DNS}
+\label{subsubsec:dns}
+
+DNS is not a hard service to run, but it does scale better with multiple CPU cores. This eliminates the dual-core devices. DNS is also not bandwidth dependent, since the requests are small. For this network the two Orange Pi Ones will be the DNS servers. This will allow for primary-secondary functions, allowing for redundancy in case on crashes.
+
+\subsubsection{Central Storage}
+\label{subsubsec:storage}
+
+There will be two kinds of storage on this network; cold and hot storage. These two types of storage will have two different purposes and storage methods. Hot storage will be reserved for active information such as the websites and mail, while Cold storage will be for larger blocks of information like backups and disk images.\\
+
+Cold storage will be handled by the Cubieboard 3 since it has the ability to run a 3.5” Hard Drive without an additional power supply. It will be hooked up to a 4 TB Seagate archival hard drive, and then share out connections using NFS.\\
+
+The hot storage will be handled by the Banana Pi M1s, which will each be hooked up to a 1 TB WD Green Drive, powered by an external computer power supply. The raw data on each disk will be replicated across the network using DRBD. LVM will then be placed on top of that and allocated according to what each individual share needs. Each of these disks will then be shared using iSCSI, allowing separation of each service's needs, and potentially encryption in the future.
+
+\subsubsection{LDAP}
+\label{subsubsec:ldap}
+
+Since the Udoo Quads can’t run storage due to the previously mentioned mistake, they will instead run the next most critical task. All of the logins for the entire network will be processed through LDAP, making it necessary to make it redundant. LDAP also has somewhat demanding RAM workloads, making the 1 gigabyte an advantage over the others.\\
+
+All local and SSH logins, and all logins to the web services will be centralized by LDAP and the assigned groups.
+
+\subsubsection{Web Servers and Load Balancers}
+\label{subsubsec:web}
+
+The web servers and their load balancer will all be run on Raspberry Pis. The lone Raspberry Pi 2 will run the Apache load balancer, using round robin balancing to distribute the load to each of the Raspberry Pi 3s. Each Raspberry Pi 3 will be running two web services- Drupal and ownCloud- and will be holding their files on the hot storage, mounting and service the web directory directly through iSCSI. All of this will be running on Apache2 and using the EFF's Certbot for SSL certificates.
+
+\subsubsection{Mail}
+\label{subsubsec:mail}
+
+Email is a surprisingly important service, but it was also one of the last services that was planned for. Originally the PINE64 was supposed to fulfil this role, but while I was planning the network out, it crashed due to a kernel issue. The only devices that I had nearby were the NanoPi Neos, which are somewhat underpowered for this situation, but there are still two of them for redundancy.
+
+\subsubsection{SQL}
+\label{subsubsec:sql}
+
+SQL databases usually like to sit in RAM, which immediately eliminates the systems that have lower amounts such as 512 MB. SQL also needs to be redundant for all of the web services, which rules out all single-devices, such as the PINE64. The Odroid XU4s are the only candidates that suit both of these needs. These devices will be running the SQL servers for all services, making them most critical to the web servers.
+
+\subsubsection{VPN and Central SSH}
+\label{subsubsec:vpn-ssh}
+
+Since I don’t need to make an OpenVPN server redundant, since it’s only supposed to be used for diagnostics, and the core SSH tasks are also for diagnostics and configuration, a single device is perfect for this. The PINE64 is a very capable device for this position, since it is has a quad-core CPU and 2 GB of RAM. It could feasibly run a web page all on its own.\\
+
+Unfortunately, the kernel that the OS was shipped with is anything but stable. A single kernel update caused the OS to become unbootable. While this seems to have been repaired with newer releases, there could still be major issues, and I simply don’t trust any essential tasks on this device.
+
+\subsection{Device Storage}
+\label{subsec:case}
+
+With a normal computer, there is a protective case preventing these devices from damage to the internal components. With ARM SBCs however, the circuit boards are exposed. When running multiple devices, stacking them on top of each other isn’t an option, since they would short each other out.\\
+
+Each device needs a protective case of some kind. Some, like the Raspberry Pi, have hundreds of pre-made ones online. Others, like the Cubieboard 3, come with one. However, for the rarer devices, such as the Orange Pi One and the NanoPi Neo, there aren’t many options. Also, stacking the individual case would lead to a pile or other random organization method that would not due for running a business network.\\
+
+The solution that I had was to plan, design, and build a custom case specifically for these devices. The case was planned to have cooling via two 120mm fans, space and latches for cable management, basement space for the USB power supply, and removable trays for each device. In the end, hardboard was chosen as the material to build the finished case out of because it was sturdier and more durable than acrylic glass, and it was far, far cheaper. The entire case came to 180 after laser cutting, since it was so large.\\
+
+There were issues with the case though. The front door of the case prevented the trays from being removed, some of the holes hadn’t been lined up properly, and the depth of the main chassis was wrong, leaving a gap between the removable trays and their support in the back. Each tray was cut for each specific device’s footprint, but I hadn’t taken into account cables overlapping or running out of room. This caused the Raspberry Pis and Orange Pi Ones to end up mounted one on top and one on bottom, taking up far more space than was intended. Most of these problems were simple to fix, or could be ignored.\\
+
+The issue with the case that was critically wrong was access to the microSD cards on these devices. Especially with the Orange Pi Ones and Raspberry Pis, the microSD cards were nearly unreachable, and for the PINE64 they actually are, since the device was flipped when it was put in, placing the microSD card facing the back of the case. Tweezers and some disassembly is required when changing cards or diagnosing issues.\\
+
+In the end though, not all devices were placed in the case, because space ran out. The PINE64, Udoo Quads, Odroid XU4s, all Raspberry Pis, Orange Pi Ones, the Cubieboard 3, its separate power supply, and its Hard Drive, ended up in the case, leaving the Banana Pi M1s and their individual 3.5” Hard Drives and power supply, along with NanoPi Neos, out.\\
+
+The solution for the Banana Pis is very haphazardly thrown together. The Hard Drives were placed in a salvaged hard drive cage from an old PC, and the Banana Pis themselves were strapped to a piece of cardboard with Velcro straps. Eventually, an actual case will be designed for them, but right now they are running and have no issues.\\
+
+The NanoPi Neos are somewhat of a different story. The devices are so small that they are easily pushed around by their cables, which are moved quite a bit since there are frequent changes where they are located. Buying a case is pointless, because, like everything, it comes from China, and by the time it gets here the project will be complete or one will have bumped into the other and shorted both out. The temporary solution is to use the same Velcro straps that hold the case together to hold the NanoPi Neos down on the top of the case.
+
+\subsection{Device Power}
+\label{subsec:power}
+
+Each device needs to be powered, but each device has different ways of being powered. The Raspberry Pis, PINE64, NanoPis, and Banana Pi M1s all use microUSB, while the Cubieboard 3 and Udoo Quads use a 12V barrel jack, and the Odroid XU4s use a larger diameter 5V 3A barrel jack, and the Orange Pis and the Cubieboard 3’s main board use a much smaller diameter 5V barrel jack, which is compatible with a USB charger.\\
+
+Originally the plan was to hook the GPIO headers up to an old computer’s power supply so that only one outlet was needed. However, I am not that confident in my soldering abilities, and this project would require quite a bit of electrical work. Also, the unmodified barrel jacks would need to be purchased, and quite a bit of GPIO wiring would need to be wrangled. This proved to be too many potential flaws just for a small benefit in space, so the idea was scrapped.\\
+
+A 10-port USB charger provides power for the Raspberry Pis (6), PINE64 (1), and Orange Pis (2), while another 6-port USB charger provides power for the Banana Pi M1s and NanoPi Neos. The Udoo Quads (2), Cubieboard 3 (1), and Odroid XU4s (2) all require an outlet for their power supplies, bringing the total outlets required up to a choking seven just for these devices. Adding in the switch and temporary router I am using, along with the UPS that they all have to plug into, and an issue with this setup begins to show.\\
+
+As mentioned above, all of these devices are hooked up to a UPS, which allows for safe shutdown in case of a power outage. One of the issues with this setup is that either every device needs access to the battery level to know when to shut down, or a single device needs the UPS tools, and the other devices need to be bound to that device to check the battery level. Instead of the sensible options, the third option is that the UPS device will have a script on it that will SSH into each device in a certain order and shut them all down in sequence. This option is probably the safest, as I can script tasks for the devices in a certain order.
+
+\subsection{Operating Systems}
+\label{subsec:oses}
+
+For this project, using the same operating system across all devices was important to maintain a common base for all devices. CentOS and Fedora have limited ARM support, so they were skipped over. Ubuntu has the same issue. However, Debian supports ARM fully, and there are many ports just for ARM. This, however, has its own problem. While these ports are Debian at their core, there are some very critical changes.\\
+
+Raspbian is the operating system built for the Raspberry Pi, so most of the bugs and issues have been ironed out over its six year life. The OS only supports the custom Broadcom chips that the Raspberry Pi uses, and, while it can be ported elsewhere, it can be buggy and mismatched.\\
+
+Armbian, on the other hand, supports all of the devices that I currently own, except the Raspberry Pis, due to their custom chip. While the project has ported both Debian and Ubuntu to ARM devices, the kernel for each device has either been built from the ground up or is only available on the CPU manufacturers website. When these kernels are released by Armbian, they are heavily modified and can cause issues.\\
+
+Also, some Armbian packages are set to overwrite existing files instead of asking, and some kernel modules and packages are installed by default and can’t be removed without recompiling the kernel. This wouldn't be a problem if their compiler tool worked, but often the build process contains numerous issues that break what is being compiled. Some devices may have several available kernels under different operating systems available, while others will only have a single kernel without another operating system choice.\\
+
+In the end though, these were the only choices to minimize the amount of different operating systems used. These are the closest to their base operating system, Debian, that I have been able to find. The other options are either compiled from source, or are not available for all of these devices. DietPi is another promising project that I may end up switching to when it matures more, but at time of writing, the project doesn’t support all of the devices that I need it to.\\
+
+In the end, stripping out all of the custom changes to both Armbian and Raspbian that I won’t use is both unfeasible and somewhat broken. Any issues will need to be addressed individually on a per-device basis.
+
+\subsection{Automated Installation}
+\label{subsec:script}
+
+One of the benefits of using two Debian-based operating systems is the ability to use Bash scripts and have them work across each device without the need to compile any code. The process for doing this is quite simple. There are two main scripts that run on each device, with separate smaller scripts called throughout the process.
+
+\subsubsection{Retrieval Script}
+\label{subsec:retrieval}
+
+The first script is a very small set of commands that creates a temporary directory, then downloads the main configuration file from an internal web server, executes it, then deletes it after it is finished. This script performs no configuration, so it can stay on a device for months without needing to be changed. This way, changes made to the configuration script do not affect any copies on the devices, since they will be pulling down a fresh copy of the configuration script every time they run.
+
+\subsubsection{Configuration Script}
+\label{subsec:configuration}
+
+The second script is the configuration script, which performs all of the configuration that is needed on these servers. Everything from the host name, MOTD, and hosts file to adding SSH keys to the authorized keys list and configuring the OpenSSH server are done by this script.\\
+
+When the configuration script starts, it goes through several steps before actually configuring anything. These steps are in place to prevent any issues with services that haven't been implemented yet or have broken, or are in the process of being set up by the script.\\ 
+
+First, it checks that it is running as root, which prevents errors with non-privileged users. It does this by running the "whoami" command and checking if the output equals "root".\\
+
+Second, it asks for a level to run at. Currently there are two; "Installation" and "Repair". The Installation mode is used when the device is first being set up. This will delete files and regenerate host SSH keys, stripping as many defaults as possible. Repair is used when Armbian is upgraded and needs to be fixed (see Section \ref{subsec:issues} for details).\\
+
+Finally, the script checks if an Ethernet or wireless interface exists. If the interface doesn't, then it is marked as nonexistent, but if it does, then the script takes the MAC addresses of the first Ethernet interface and the first wireless interface, if each exists, and places them in their own variables. These values are used later on when the configuration script needs to define which device it is configuring.\\
+
+In order to identify each device, the script has the MAC Addresses of each device hard-coded into the script, and then compares the MAC Address that it read from the device to each of these. This will also assign variables such as the hostname, IP Address, and other device attributes that show up later in the MOTD and package manager options.\\
+
+Once this step finishes, configurations begin. Based on the identification provided by the MAC address, all of the essential variables on the network can be worked out, making configuration a snap.
+
+\subsection{Networking}
+\label{subsec:network}
+
+Networking all of these devices together proved to be problematic early on. Originally, the plan was to use a ClearFog Pro connected through an SFP cable to a MikroTik CRS125-24G-1S-2HnD-IN 24-port gigabit switch with built in 2.4 GHz wireless. However, the ClearFog pro was backlogged until almost after the project was finished. While the device was on order, the devices were instead hooked up to a PFsense router, with the same IP range that the ClearFog was supposed to use. Since the ClearFog Pro wasn't used during these tests, it has been omitted from the results of this experiment.\\
+
+Networking was a unique challenge due to the the variety of different devices and services. As discussed in Section \ref{subsubsec:allwinner-mac}, some of the devices have network-related issues, which made implementing any kind of network security next to impossible.\\
+
+In the end, network security was deemed a non-issue, since this is only a test network and will most likely need to be reformatted regularly. Some of this was because of the need to add firewalls to every device in the script discussed in Section \ref{subsec:script}, which would have added another layer of complexity.
+
+\begin{table}[ht]
+\caption{IP Addressing and naming of devices}
+\label{tab:ip-addresses}
+\begin{center}
+\begin{tabular}{|l|l|l|l|}
+\hline
+\rule[-1ex]{0pt}{3.5ex} Name         & Usage             & Device Type    & IP          \\
+\hline\hline
+\rule[-1ex]{0pt}{3.5ex} Folgore      & Primary DNS       & Orange Pi One  & 172.18.0.10 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Fulmine      & Secondary DNS     & Orange Pi One  & 172.18.0.11 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Gremyashchiy & Cold Storage      & Cubieboard 3   & 172.18.0.15 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Blyskawica   & OpenVPN and SSH   & PINE64 2GB     & 172.18.0.20 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Gearing      & LDAP Provider     & Udoo Quad      & 172.18.0.25 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Kepler       & LDAP Consumer     & Udoo Quad      & 172.18.0.26 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Ilex         & Email             & NanoPi Neo     & 172.18.0.30 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Intrepid     & Backup Email      & NanoPi Neo     & 172.18.0.31 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Serrano      & SQL Distributor   & Odroid XU4     & 172.18.0.35 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Orella       & SQL Replicator    & Odroid XU4     & 172.18.0.36 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Sleipnir     & GlusterFS Node    & Banana Pi M1   & 172.18.0.40 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Aeger        & GlusterFS Node    & Banana Pi M1   & 172.18.0.41 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Kagero       & Web Load Balancer & Raspberry Pi 2 & 172.18.0.45 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Fubuki       & Web Server        & Raspberry Pi 3 & 172.18.0.50 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Miyuki       & Web Server        & Raspberry Pi 3 & 172.18.0.51 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Shirayuki    & Web Server        & Raspberry Pi 3 & 172.18.0.52 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Hatsuyuki    & Web Server        & Raspberry Pi 3 & 172.18.0.53 \\
+\hline
+\rule[-1ex]{0pt}{3.5ex} Murakumo     & Web Server        & Raspberry Pi 3 & 172.18.0.54 \\
+\hline
+\end{tabular}
+\end{center}
+\end{table}
+
+\section{Results}
+\label{sec:results}
+
+When compared to a server of similar price to this cluster (\~ \$1,500), in theory there are some very competitive benefits using the ARM devices. These are features like redundancy and backups, along with similar or lower power consumption. However, tied to this are issues such as storage, outlet density and network capacity. Overall there are some glaring issues with this setup.\\
+
+\subsection{Detailed Service Setup}
+\label{subsec:services-detail}
+
+In Section \ref{subsec:dev-assignment}, the process for deciding how each device was assigned was discussed. Here, each of those services will be discussed in detail, showing their configuration, how they worked, and any potential improvements.
+
+\subsubsection{DNS}
+\label{subsubsec:dns-config}
+
+The DNS Servers were set up using bind9, with a master-slave configuration. The two Orange Pi Ones were chosen for this task.
+
+Master server's configuration is as follows:
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# DNS Requires:
+# bind9 - DNS Server
+# dns-utils - Diagnostics
+apt-get -y install bind9 dnsutils
+
+## From device configuration section
+# Bind Directory Configuration
+mkdir /var/cache/bind/zones/
+chown bind:bind /var/cache/bind/zones/
+mkdir /var/cache/bind/keys/
+chown bind:bind /var/cache/bind/keys/
+mkdir /etc/bind/data/
+chown bind:bind /etc/bind/data/
+touch /etc/bind/data/named.run
+chown bind:bind /etc/bind/data/named.run
+	
+# DNS Server Configuration
+cat <<'EOF' > /etc/bind/named.conf.options
+acl LAN {
+172.18.0.0/24;
+127.0.0.1;
+localhost;
+};
+
+acl Transfer {
+172.18.0.11;
+};
+
+options {
+listen-on port 53 { 127.0.0.1; 172.18.0.10; };
+directory       "/var/cache/bind";
+allow-query     { LAN; };
+allow-transfer  { Transfer; };
+recursion yes;
+allow-recursion { LAN; };
+
+dnssec-enable yes;
+dnssec-validation yes;
+dnssec-lookaside auto;
+
+/* Path to ISC DLV key */
+#bindkeys-file "/etc/named.iscdlv.key";
+
+managed-keys-directory "/var/cache/bind/keys/";
+
+additional-from-auth yes;
+additional-from-cache yes;
+forwarders { 172.18.0.1; };
+
+};
+
+logging {
+channel default_debug {
+file "/etc/bind/data/named.run";
+severity dynamic;
+};
+};
+
+zone "arm.taypc6.com" IN {
+type master;
+file "/var/cache/bind/zones/fw.arm.taypc6.com";
+allow-update { none; };
+};
+
+zone "0.18.172.in-addr.arpa" IN {
+type master;
+file "/var/cache/bind/zones/rev.arm.taypc6.com";
+allow-update { none; };
+};
+EOF
+
+
+# Forward Zone
+cat <<'EOF' > /var/cache/bind/zones/fw.arm.taypc6.com
+$TTL 86400	; Specifics			172.18.0.	.arm.taypc6.com.
+@	IN	SOA	ns.arm.taypc6.com.	blyskawica.arm.taypc6.com.	(
+	17050119			; Serial (YYMMDDHH)
+	3600				; Refresh
+	1800				; Retry
+	604800				; Expire
+	3600				; Minimum TTL
+)					
+					
+@	IN	NS	ns.arm.taypc6.com.		; NS Record for Unified DNS
+@	IN	NS	ns0.arm.taypc6.com.		; NS Record for ns0
+@	IN	NS	ns1.arm.taypc6.com.		; NS Record for ns1
+					
+@	IN	MX	1	mail.arm.taypc6.com.	; MX Record for Mail (Unified)
+@	IN	MX	10	mail0.arm.taypc6.com.	; MX Record for Mail (Ilex)
+@	IN	MX	10	mail1.arm.taypc6.com.	; MX Record for Mail (Intrepid)
+					
+clover	IN	A	172.18.0.1			; A Record for Clover Router
+					
+ns	IN	A	172.18.0.10				; A Record for Unified DNS
+ns0	IN	A	172.18.0.10				; A Record for ns0
+folgore	IN	A	172.18.0.10			; A Record for Folgore DNS
+ns	IN	A	172.18.0.11				; A Record for Unified DNS
+ns1	IN	A	172.18.0.11				; A Record for ns1
+fulmine	IN	A	172.18.0.11			; A Record for Fulmine DNS
+					
+nfs	IN	A	172.18.0.15				; A Record for NFS (Gremyashchiy)
+gremyashchiy	IN	A	172.18.0.15		; A Record for Gremyashchiy
+					
+vpn	IN	A	172.18.0.20				; A Record for vpn (Blyskawica)
+blyskawica	IN	A	172.18.0.20		; A Record for Blyskawica
+					
+ldap	IN	A	172.18.0.25			; A Record for Unified LDAP (Gearing)
+ldap0	IN	A	172.18.0.25			; A Record for ldap0 (Gearing)
+gearing	IN	A	172.18.0.25			; A Record for Gearing LDAP
+ldap	IN	A	172.18.0.26			; A Record for Unified LDAP (Kepler)
+ldap1	IN	A	172.18.0.26			; A Record for ldap1 (Kepler)
+kepler	IN	A	172.18.0.26			; A Record for Kepler LDAP
+					
+mail	IN	A	172.18.0.30			; A Record for Unified Mail (Ilex)
+mail0	IN	A	172.18.0.30			; A Record for mail0 (Ilex)
+ilex	IN	A	172.18.0.30			; A Record for Ilex Mail
+mail	IN	A	172.18.0.31			; A Record for Unified Mail (Intrepid)
+mail1	IN	A	172.18.0.31			; A Record for mail1 (Intrepid)
+intrepid	IN	A	172.18.0.31		; A Record for Intrepid Mail
+					
+sql	IN	A	172.18.0.35				; A Record for Unified SQL (Serrano)
+sql0	IN	A	172.18.0.35			; A Record for sql0 (Serrano)
+serrano	IN	A	172.18.0.35			; A Record for Serrano SQL
+sql	IN	A	172.18.0.36				; A Record for Unified SQL (Orella)
+sql1	IN	A	172.18.0.36			; A Record for sql1 (Orella)
+orella	IN	A	172.18.0.36			; A Record for Orella SQL
+					
+iscsi	IN	A	172.18.0.40			; A Record for Unified iSCSI (Sleipnir)
+iscsi0	IN	A	172.18.0.40			; A Record for iscsi0 (Sleipnir)
+sleipnir	IN	A	172.18.0.40		; A Record for Sleipnir GlusterFS
+iscsi	IN	A	172.18.0.41			; A Record for Unified iSCSI (Aeger)
+iscsi1	IN	A	172.18.0.41			; A Record for iscsi (Aeger)
+aeger	IN	A	172.18.0.41			; A Record for Aeger GlusterFS
+					
+@	IN	A	172.18.0.45				; A Record for @ (Kagero)
+web	IN	A	172.18.0.45				; A Record for web (Kagero)
+www	IN	A	172.18.0.45				; A Record for www (Kagero)
+owncloud	IN	A	172.18.0.45		; A Record for owncloud (Kagero)
+kagero	IN	A	172.18.0.45			; A Record for Kagero Load Balancer
+					
+web0	IN	A	172.18.0.50			; A Record for drupal0 (Fubuki)
+owncloud0	IN	A	172.18.0.50		; A Record for owncloud0 (Fubuki)
+fubuki	IN	A	172.18.0.50			; A Record for Fubuki Web Server
+drupal1	IN	A	172.18.0.51			; A Record for drupal1 (Miyuki)
+owncloud1	IN	A	172.18.0.51		; A Record for owncloud1 (Miyuki)
+miyuki	IN	A	172.18.0.51			; A Record for Miyuki Web Server
+drupal2	IN	A	172.18.0.52			; A Record for drupal2 (Shirayuki)
+owncloud2	IN	A	172.18.0.52		; A Record for owncloud0 (Shirayuki)
+shirayuki	IN	A	172.18.0.52		; A Record for Shirayuki Web Server
+drupal3	IN	A	172.18.0.53			; A Record for drupal3 (Hatsuyuki)
+owncloud3	IN	A	172.18.0.53		; A Record for owncloud0 (Hatsuyuki)
+hatsuyuki	IN	A	172.18.0.53		; A Record for Hatsuyuki Web Server
+drupal4	IN	A	172.18.0.54			; A Record for drupal4 (Murakumo)
+owncloud4	IN	A	172.18.0.54		; A Record for owncloud0 (Murakumo)
+murakumo	IN	A	172.18.0.54		; A Record for Murakumo Web Server
+EOF
+
+
+# Reverse Zone
+cat <<'EOF' > /var/cache/bind/zones/rev.arm.taypc6.com
+$TTL 86400	; Specifics				.arm.taypc6.com.
+@	IN	SOA	ns.arm.taypc6.com.	blyskawica.arm.taypc6.com.	(
+	17020812				; Serial (YYMMDDHH)
+	3600				; Refresh
+	1800				; Retry
+	604800				; Expire
+	3600				; Minimum TTL
+)					
+					
+@	IN	NS	ns.arm.taypc6.com.		; NS Record for Unified DNS
+@	IN	NS	ns0.arm.taypc6.com.		; NS Record for ns0
+@	IN	NS	ns1.arm.taypc6.com.		; NS Record for ns1
+					
+@	IN	MX	1	mail.arm.taypc6.com.	; MX Record for Mail (Blyskawica)
+@	IN	MX	10	mail0.arm.taypc6.com.	; MX Record for Mail (Ilex)
+@	IN	MX	10	mail1.arm.taypc6.com.	; MX Record for Mail (Intrepid)
+					
+1	IN	PTR	clover.arm.taypc6.com.		; PTR Record for Clover Router
+					
+10	IN	PTR	folgore.arm.taypc6.com.		; PTR Record for Folgore DNS
+11	IN	PTR	fulmine.arm.taypc6.com.		; PTR Record for Fulmine DNS
+					
+15	IN	PTR	gremyashchiy.arm.taypc6.com.		; PTR Record for Gremyashchiy Storage
+					
+20	IN	PTR	blyskawica.arm.taypc6.com.		; PTR Record for Blyskawica
+					
+25	IN	PTR	gearing.arm.taypc6.com.		; PTR Record for Gearing LDAP 
+26	IN	PTR	kepler.arm.taypc6.com.		; PTR Record for Kepler LDAP
+					
+30	IN	PTR	ilex.arm.taypc6.com.		; PTR Record for Ilex Mail
+31	IN	PTR	intrepid.arm.taypc6.com.		; PTR Record for Intrepid Mail
+					
+35	IN	PTR	serrano.arm.taypc6.com.		; PTR Record for Folgore SQL
+36	IN	PTR	orella.arm.taypc6.com.		; PTR Record for Fulmine SQL
+					
+40	IN	PTR	sleipnir.arm.taypc6.com.		; PTR Record for Sleipnir GlusterFS
+41	IN	PTR	aeger.arm.taypc6.com.		; PTR Record for Aeger GlusterFS
+					
+45	IN	PTR	kagero.arm.taypc6.com.		; PTR Record for Kagero Load Balancer
+					
+50	IN	PTR	fubuki.arm.taypc6.com.		; PTR Record for Fubuki Web Server
+51	IN	PTR	miyuki.arm.taypc6.com.		; PTR Record for Miyuki Web Server
+52	IN	PTR	shirayuki.arm.taypc6.com.		; PTR Record for Shirayuki Web Server
+53	IN	PTR	hatsuyuki.arm.taypc6.com.		; PTR Record for Hatsuyuki Web Server
+54	IN	PTR	murakumo.arm.taypc6.com.		; PTR Record for Murakumo Web Server
+					
+200	IN	PTR	eevee.arm.taypc6.com.		; PTR Record for Eevee Storage Server
+EOF
+
+# Restart DNS Service
+systemctl restart bind9.service
+\end{lstlisting}
+
+Slave server's Configuration is as follows:
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# DNS Requires:
+# bind9 - DNS Server
+# dns-utils - Diagnostics
+apt-get -y install bind9 dnsutils
+
+## From device configuration section
+# Bind Directory Configuration
+mkdir /var/cache/bind/zones/
+chown bind:bind /var/cache/bind/zones/
+mkdir /var/cache/bind/keys/
+chown bind:bind /var/cache/bind/keys/
+mkdir /etc/bind/data/
+chown bind:bind /etc/bind/data/
+touch /etc/bind/data/named.run
+chown bind:bind /etc/bind/data/named.run
+	
+# DNS Server Configuration
+cat <<'EOF' > /etc/bind/named.conf.options
+acl LAN {
+172.18.0.0/24;
+127.0.0.1;
+localhost;
+};
+
+options {
+listen-on port 53 { 127.0.0.1; 172.18.0.11; };
+directory "/var/cache/bind";
+allow-query     { LAN; };
+allow-transfer  { none; };
+recursion yes;
+allow-recursion { LAN; };
+
+dnssec-enable yes;
+dnssec-validation yes;
+dnssec-lookaside auto;
+
+/* Path to ISC DLV key */
+#bindkeys-file "/etc/named.iscdlv.key";
+
+managed-keys-directory "/var/cache/bind/keys/";
+
+additional-from-auth yes;
+additional-from-cache yes;
+forwarders { 172.18.0.1; };
+};
+
+logging {
+channel default_debug {
+file "/etc/bind/data/named.run";
+severity dynamic;
+};
+};
+
+zone "arm.taypc6.com" IN {
+type slave;
+file "/var/cache/bind/zones/fw.arm.taypc6.com";
+masters { 172.18.0.10; };
+};
+
+zone "0.18.172.in-addr.arpa" IN {
+type slave;
+file "/var/cache/bind/zones/rev.arm.taypc6.com";
+masters { 172.18.0.10; };
+};
+EOF
+
+# Restart DNS Service
+service bind9 restart
+\end{lstlisting}
+
+\subsubsection{Cold Storage}
+\label{subsubsec:cold-config}
+
+The cold storage server will be sharing the connections from its 4 TB Hard Drive over NFS, which leaves plenty of room for any future growth. Each device will have its own NFS Backup share which only that one device is allowed to access.this will isolate each backup directory from accidental overwrites, and keep misconfiguration in the script from pointing a server at the wrong NFS share.
+
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# Storage Requires:
+# nfs-kernel-server - To share backup directory from archive drive
+apt-get -y install nfs-kernel-server
+
+## From device configuration section
+mkdir /srv/files
+echo "/dev/sda2 none swap sw 0 0
+/dev/sda3 /srv/files ext4 defaults,noatime,nodiratime 0 0" >> /etc/fstab
+
+# Create backup export file
+cat <<'EOF' > /etc/exports
+/srv/files/backups/folgore	folgore.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/fulmine	fulmine.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/blyskawica	blyskawica.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/gearing	gearing.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/kepler	kepler.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/ilex	ilex.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/intrepid	intrepid.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/serrano	serrano.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/orella	orella.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/sleipnir	sleipnir.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/aeger	aeger.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/kagero	kagero.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/fubuki	fubuki.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/miyuki	miyuki.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/shirayuki	shirayuki.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/hatsuyuki	hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check)
+/srv/files/backups/murakumo	murakumo.arm.taypc6.com(rw,sync,no_subtree_check)
+#/srv/files/repository-data	web.arm.taypc6.com(rw,sync,no_subtree_check)	# Repository is not being set up at this time
+EOF
+
+# Create directories
+mkdir -p /srv/files/backups/folgore
+mkdir -p /srv/files/backups/fulmine
+mkdir -p /srv/files/backups/gremyashchiy
+mkdir -p /srv/files/backups/blyskawica
+mkdir -p /srv/files/backups/gearing
+mkdir -p /srv/files/backups/kepler
+mkdir -p /srv/files/backups/ilex
+mkdir -p /srv/files/backups/intrepid
+mkdir -p /srv/files/backups/serrano
+mkdir -p /srv/files/backups/orella
+mkdir -p /srv/files/backups/sleipnir
+mkdir -p /srv/files/backups/aeger
+mkdir -p /srv/files/backups/kagero
+mkdir -p /srv/files/backups/fubuki
+mkdir -p /srv/files/backups/miyuki
+mkdir -p /srv/files/backups/shirayuki
+mkdir -p /srv/files/backups/hatsuyuki
+mkdir -p /srv/files/backups/murakumo
+#mkdir -p /srv/files/repository-data	# Repository is not being set up at this time
+\end{lstlisting}
+
+\subsubsection{VPN and SSH}
+\label{subsubsec:vpn-config}
+
+\subsubsection{LDAP}
+\label{subsubsec:ldap-config}
+
+The LDAP server will be run using OpenLDAP and phpLDAPadmin. This will be run using a provider-consumer setup using a seperate user account to pass the information back and forth.
+
+The provider's configuration:
+
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# LDAP Requires:
+# slapd - LDAP Server
+# ldap-utils, ldapscripts - Easy management and testing utilities for LDAP
+# phpldapadmin - Web-based management of the LDAP Server
+apt-get -y install slapd ldap-utils ldapscripts phpldapadmin
+
+## From device configuration section
+# Purge backups
+rm -rf /var/backups/*ldap*
+
+# Run dpkg-reconfigure
+dpkg-reconfigure slapd	
+	
+# Configure phpLDAPadmin
+cat <<'EOF' > /etc/phpldapadmin/config.php
+<?php
+$config->custom->appearance['hide_template_warning'] = true;
+$config->custom->appearance['friendly_attrs'] = array(
+        'facsimileTelephoneNumber' => 'Fax',
+        'gid'                      => 'Group',
+        'mail'                     => 'Email',
+        'telephoneNumber'          => 'Telephone',
+        'uid'                      => 'User Name',
+        'userPassword'             => 'Password'
+);
+$servers = new Datastore();
+$servers->newServer('ldap_pla');
+$servers->setValue('server','name','Gearing LDAP Server');
+$servers->setValue('server','host','gearing.arm.taypc6.com');
+$servers->setValue('server','base',array('dc=arm,dc=taypc6,dc=com'));
+$servers->setValue('login','auth_type','session');
+$servers->setValue('login','bind_id','cn=admin,dc=arm,dc=taypc6,dc=com');
+?>
+EOF
+
+# Add LDIF Files
+## Add LDAP Replicator Object
+cat <<'EOF' > /tmp/config/add_replicator.ldif
+dn: cn=ldapsync,dc=arm,dc=taypc6,dc=com
+objectClass: simpleSecurityObject
+objectClass: organizationalRole
+cn: ldapsync
+description: LDAP Server Replicator
+userPassword: ldapsync
+EOF
+
+## Load LDAP Sync Module
+cat <<'EOF' > /tmp/config/mod_syncrepl.ldif
+dn: cn=module,cn=config
+objectClass: olcModuleList
+cn: module
+olcModulePath: /usr/lib/ldap
+olcModuleLoad: syncprov.la
+EOF
+
+## Activate LDAP Sync Module
+cat <<'EOF' > /tmp/config/syncrepl.ldif
+dn: olcOverlay=syncprov,olcDatabase={1}mdb,cn=config
+changeType: add
+objectClass: olcOverlayConfig
+objectClass: olcSyncProvConfig
+olcOverlay: syncprov
+olcSpSessionLog: 100
+olcSpCheckpoint: 100 10
+EOF
+
+## Allow LDAP Replicator Object to access passwords
+cat <<'EOF' > /tmp/config/permissions.ldif
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+add: olcAccess
+olcAccess: {0}to attrs=userPassword,shadowLastChange by self write by anonymous auth by dn="cn=admin,dc=arm,dc=taypc6,dc=com" write by dn="cn=ldapsync,dc=arm,dc=taypc6,dc=com" read by * none
+EOF
+
+# Enable LDIF Files
+ldapadd -x -W -D cn=admin,dc=arm,dc=taypc6,dc=com -f /tmp/config/add_replicator.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/config/mod_syncrepl.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/config/syncrepl.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/config/permissions.ldif
+
+# Add Configuration LDIF File
+cat <<'EOF' > /tmp/config/users_and_groups.ldif
+dn: ou=People,dc=arm,dc=taypc6,dc=com
+objectClass: organizationalUnit
+ou: People
+
+dn: ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: organizationalUnit
+ou: Groups
+
+dn: cn=users,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5000
+
+dn: cn=admin,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5001
+
+dn: cn=login,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5002
+
+dn: cn=ssh,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5050
+
+dn: cn=drupal,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5100
+
+dn: cn=owncloud,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5101
+
+dn: cn=roundcube,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5102
+
+dn: cn=repository,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5103
+
+dn: cn=phpldapadmin,ou=Groups,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: posixGroup
+gidNumber: 5104
+
+dn: uid=taylor,ou=People,dc=arm,dc=taypc6,dc=com
+objectClass: top
+objectClass: account
+objectClass: posixAccount
+objectClass: shadowAccount
+cn: Taylor Chien
+uid: taylor
+uidNumber: 10000
+gidNumber: 5000
+homeDirectory: /home/taylor
+loginShell: /bin/bash
+gecos: Taylor Chien
+userPassword: {crypt}x
+shadowLastChange: 0
+shadowMax: 0
+shadowWarning: 0
+EOF
+
+# Enable Configuration LDIF File
+ldapadd -x -W -D "cn=admin,dc=arm,dc=taypc6,dc=com" -f /tmp/config/users_and_groups.ldif
+
+# Change LDAP Password for 'taylor'
+echo "Enter password for LDAP user taylor"
+read LDAP_PASSWORD
+ldappasswd -s $LDAP_PASSWORD -W -D "cn=admin,dc=arm,dc=taypc6,dc=com" -x "uid=taylor,ou=People,dc=arm,dc=taypc6,dc=com"
+\end{lstlisting}
+
+LDAP Consumer Configuration:
+
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# LDAP Requires:
+# slapd - LDAP Server
+# ldap-utils, ldapscripts - Easy management and testing utilities for LDAP
+# phpldapadmin - Web-based management of the LDAP Server
+apt-get -y install slapd ldap-utils ldapscripts phpldapadmin
+
+## From device configuration section
+# Purge backups
+rm -rf /var/backups/*ldap*
+
+# Run dpkg-reconfigure
+dpkg-reconfigure slapd	
+
+# Configure phpLDAPadmin
+cat <<'EOF' > /etc/phpldapadmin/config.php
+<?php
+$config->custom->appearance['hide_template_warning'] = true;
+$config->custom->appearance['friendly_attrs'] = array(
+        'facsimileTelephoneNumber' => 'Fax',
+        'gid'                      => 'Group',
+        'mail'                     => 'Email',
+        'telephoneNumber'          => 'Telephone',
+        'uid'                      => 'User Name',
+        'userPassword'             => 'Password'
+);
+$servers = new Datastore();
+$servers->newServer('ldap_pla');
+$servers->setValue('server','name','Kepler LDAP Server');
+$servers->setValue('server','host','kepler.arm.taypc6.com');
+$servers->setValue('server','base',array('dc=arm,dc=taypc6,dc=com'));
+$servers->setValue('login','auth_type','session');
+$servers->setValue('login','bind_id','cn=admin,dc=arm,dc=taypc6,dc=com');
+?>
+EOF
+
+# Build LDIF Files
+cat <<'EOF' > /tmp/config/server_number.ldif
+dn: cn=config
+changeType: modify
+add: olcServerID
+olcServerID: 1
+EOF
+
+cat <<'EOF' > /tmp/config/enable_replication.ldif
+dn: olcDatabase={1}mdb,cn=config
+changetype: modify
+replace: olcSyncRepl
+olcSyncRepl: rid=001 provider=ldap://gearing.arm.taypc6.com bindmethod=simple binddn="cn=ldapsync,dc=arm,dc=taypc6,dc=com" credentials=ldapsync searchbase="dc=arm,dc=taypc6,dc=com" scope=sub schemachecking=on type=refreshAndPersist retry="30 5 300 3" timeout=1 interval=00:00:05:00
+-
+add: olcMirrorMode
+olcMirrorMode: TRUE
+EOF
+
+# Enable LDIF Files
+ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/config/server_number.ldif
+ldapadd -Y EXTERNAL -H ldapi:/// -f /tmp/config/enable_replication.ldif
+\end{lstlisting}
+
+\subsubsection{Mail}
+\label{subsubsec:mail-config}
+
+\subsubsection{SQL}
+\label{subsubsec:sql-config}
+
+The method used for replicating the MySQL database is well defined, but when attempting it on the actual devices, MySQL completely crashed and could not be started again. After attempting this many times, including a complete purge of the program, it still happened.\\
+
+The issues that I found ranged from an improper configuration guide to a misplaced variable, but no matter what, the replication would not work.\\
+
+In the end, a single server was used, and the replication was never implemented. The MySQL configuration for that server is as follows (passwords omitted):
+
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# SQL Requires:
+# mysql-server - MySQL Server itself
+# mysql-client - For accessing MySQL items
+apt-get -y install mysql-server mysql-client
+
+## From device configuration section
+# Run mysql_secure_installation
+# Disabled until SQL works properly, no accidental resets
+#mysql_secure_installation
+
+## MANUAL CONFIGURATION ALERT
+## In /etc/mysql/my.cnf
+## Allow external devices to connect
+# bind-address = 172.18.0.35
+## Change server ID to master for failover - disabled due to broken pooling
+# #server-id = 1
+## Log file for pooling - disabled due to broken pooling
+# #log_bin = /var/log/mysql/mysql-bin.log
+## Allow Drupal and ownCloud databases to sync - disabled due to broken pooling
+# #binlog_do_db = DrupalDatabase
+# #binlog_do_db = ownCloudDatabase
+
+# Database Generation
+cat <<'EOF' > /tmp/Database.sql
+CREATE USER 'Drupal'@'%' IDENTIFIED BY 'RANDOMPASSWORD1';
+CREATE USER 'ownCloud'@'%' IDENTIFIED BY 'RANDOMPASSWORD2';
+CREATE DATABASE IF NOT EXISTS DrupalDatabase;
+CREATE DATABASE IF NOT EXISTS ownCloudDatabase;
+GRANT ALL PRIVILEGES ON `DrupalDatabase`.* TO 'Drupal'@'%';
+GRANT ALL PRIVILEGES ON `ownCloudDatabase`.* TO 'ownCloud'@'%';
+EOF
+
+# Database Import
+mysql -u root -p < /tmp/Database.sql
+\end{lstlisting}
+
+\subsubsection{Hot Storage}
+\label{subsubsec:hot-config}
+
+The hot storage servers were a critical element of the network, but they suffered from an issue documented in Section \ref{subsubsec:drbd-error}. This issue created a critical problem with the way the files were shared.\\
+
+The solution to the DRBD problem was to use GlusterFS and NFS, even though this is not the recommended solution for ownCloud. Also, in order to use NFS as a root web directory, I had to disable root squash, which is a major security issue. This is not a recommended configuration, but one that works.
+
+Primary Gluster Server's configuration:
+\begin{lstlisting}
+# Make Gluster Directory
+sudo mkdir -p /srv/gluster/gv0
+echo "/dev/sda1 /srv/gluster ext4 defaults,noatime,nodiratime 0 0
+/dev/sda2 none swap sw 0 0" >> /etc/fstab
+mount /dev/sda1
+swapon /dev/sda2
+
+# Probe Peers
+gluster peer probe aeger.arm.taypc6.com
+
+# Set up NFS
+cat <<'EOF' > /etc/exports
+/srv/gluster/gv0/web kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/owncloud kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/owncloud-data kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/mail ilex.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) intrepid.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+EOF
+
+# Establish Gluster Replication
+gluster volume create gv0 replica 2 sleipnir.arm.taypc6.com:/srv/gluster/gv0 aeger.arm.taypc6.com:/srv/gluster/gv0
+gluster volume start gv0
+
+# Establish hard disk mounts
+sudo mkdir -p /srv/gluster/gv0/web
+sudo mkdir -p /srv/gluster/gv0/owncloud
+sudo mkdir -p /srv/gluster/gv0/owncloud-data
+sudo mkdir -p /srv/gluster/gv0/mail
+
+# Restart Services
+systemctl restart glusterfs-server.service
+systemctl restart nfs-kernel-server.service
+\end{lstlisting}
+
+Secondary Gluster Server's Configuration:
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# Hot Storage Requires:
+# nfs-kernel-server - To share backup directory from mounted drives
+# glusterfs - To create a RAID 1 drive across devices
+apt-get -y install nfs-kernel-server glusterfs-server
+
+## From device configuration section
+# Establish hard disk mounts
+sudo mkdir -p /srv/gluster/gv0
+echo "/dev/sda1 /srv/gluster ext4 defaults,noatime,nodiratime 0 0
+/dev/sda2 none swap sw 0 0" >> /etc/fstab
+mount /dev/sda1
+swapon /dev/sda2
+
+# Probe Peers
+gluster peer probe sleipnir.arm.taypc6.com
+
+# Set up NFS
+cat <<'EOF' > /etc/exports
+/srv/gluster/gv0/web kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/owncloud kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/owncloud-data kagero.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) fubuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) miyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) shirayuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) hatsuyuki.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) murakumo.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+/srv/gluster/gv0/mail ilex.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash) intrepid.arm.taypc6.com(rw,sync,no_subtree_check,no_root_squash)
+EOF
+
+# Restart Services
+systemctl restart glusterfs-server.service
+systemctl restart nfs-kernel-server.service
+\end{lstlisting}
+
+\subsubsection{Load Balancer}
+\label{subsubsec:lb-config}
+
+The load balancer is an Apache2 server with round-robin passing. This is not an optimal setup for ownCloud, as it may cause session resets and unintended logouts. It is optimal for a static web page only.\\
+
+Load Balancer Configuration
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# Web and Load Balancer require:
+# apache2 - Actual web server
+# php5 - For php programs
+# libapache2-mod-php5 - For interfacing between apache and php
+# php5-* - Required for ownCloud or Drupal in one way or another
+apt-get -y install apache2 php5 libapache2-mod-php5 php5-mysqlnd php5-curl php5-gd php5-intl php-pear php5-imagick php5-imap php5-mcrypt php5-memcache php5-ming php5-ps php5-pspell php5-recode php5-tidy php5-xmlrpc php5-xsl php5-apcu
+
+## From device configuration section
+# Delete Current Sites
+#rm /etc/apache2/sites-available/*
+# Causes major Apache errors
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web-lb
+<VirtualHost *:80>
+ServerName arm.taypc6.com
+ServerAlias www.arm.taypc6.com
+ServerAlias web.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+<Proxy balancer://web>
+# Fubuki
+BalancerMember http://web0.arm.taypc6.com
+# Miyuki
+BalancerMember http://web1.arm.taypc6.com
+# Shirayuki
+BalancerMember http://web2.arm.taypc6.com
+# Hatsuyuki
+BalancerMember http://web3.arm.taypc6.com
+# Murakumo
+BalancerMember http://web4.arm.taypc6.com
+
+ProxySet lbmethod=byrequests
+</Proxy>
+ProxyPass / balancer://web/
+
+ErrorLog ${APACHE_LOG_DIR}/web-http-error.log
+CustomLog ${APACHE_LOG_DIR}/web-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud-lb
+<VirtualHost *:80>
+ServerName owncloud.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+<Proxy balancer://owncloud>
+# Fubuki
+BalancerMember http://owncloud0.arm.taypc6.com
+# Miyuki
+BalancerMember http://owncloud1.arm.taypc6.com
+# Shirayuki
+BalancerMember http://owncloud2.arm.taypc6.com
+# Hatsuyuki
+BalancerMember http://owncloud3.arm.taypc6.com
+# Murakumo
+BalancerMember http://owncloud4.arm.taypc6.com
+
+ProxySet lbmethod=byrequests
+</Proxy>
+ProxyPass / balancer://owncloud/
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# Start and enable services
+service rpcbind start
+
+# Create web directories
+mkdir -p /var/www/web
+mkdir -p /var/www/owncloud
+mkdir -p /srv/www/owncloud-data
+chown www-data:www-data /var/www/web
+chown www-data:www-data /var/www/owncloud
+chown www-data:www-data /srv/www/owncloud-data
+
+# Add NFS mounts
+cat <<'EOF' >> /etc/fstab
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud /var/www/owncloud nfs rsize=8192,wsize=8192,timeo=14,intr
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud-data /srv/www/owncloud-data nfs rsize=8192,wsize=8192,timeo=14,intr
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/web /var/www/web nfs rsize=8192,wsize=8192,timeo=14,intr
+EOF
+
+# Mount directories
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/web
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud-data
+
+# Add ownCloud Key
+#wget -nv #https://download.owncloud.org/download/repositories/stable/Debian_8.0/Release.key -O /tmp/Release.key
+#apt-key add - < /tmp/Release.key
+# Raspbian's ownCloud breaks this
+
+# Add ownCloud Repository
+#sh -c "echo 'deb http://download.owncloud.org/download/repositories/stable/Debian_8.0/ /' > /etc/apt/sources.list.d/owncloud.list"
+# Raspbian's ownCloud breaks this
+
+# Update and install ownCloud
+apt-get update
+apt-get install owncloud
+
+# Enable Sites
+a2dissite 000-default.conf
+a2ensite 10-http-web-lb 11-http-owncloud-lb
+\end{lstlisting}
+
+\subsubsection{Web Server Configuration}
+\label{subsubsec:web-config}
+
+Each of the web servers
+
+\begin{lstlisting}
+# Excerpt from automatic configuration script
+
+## From Package installation section
+# Web and Load Balancer require:
+# apache2 - Actual web server
+# php5 - For php programs
+# libapache2-mod-php5 - For interfacing between apache and php
+# php5-* - Required for ownCloud or Drupal in one way or another
+apt-get -y install apache2 php5 libapache2-mod-php5 php5-mysqlnd php5-curl php5-gd php5-intl php-pear php5-imagick php5-imap php5-mcrypt php5-memcache php5-ming php5-ps php5-pspell php5-recode php5-tidy php5-xmlrpc php5-xsl php5-apcu
+
+## From device configuration section
+## Please not that this sections contains part of a long "if" statement and those references have not been removed
+#
+## FUBUKI CONFIGURATION
+elif [ $DEVHOSTNAME == 'fubuki' ]; then
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web
+<VirtualHost *:80>
+ServerName web0.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud
+<VirtualHost *:80>
+ServerName owncloud0.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+## END FUBUKI CONFIURATION
+#
+
+
+
+#
+## MIYUKI CONFIGURATION
+elif [ $DEVHOSTNAME == 'miyuki' ]; then
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web
+<VirtualHost *:80>
+ServerName web1.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud
+<VirtualHost *:80>
+ServerName owncloud1.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+## END MIYUKI CONFIURATION
+#
+
+
+
+#
+## SHIRAYUKI CONFIGURATION
+elif [ $DEVHOSTNAME == 'shirayuki' ]; then
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web
+<VirtualHost *:80>
+ServerName web2.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud
+<VirtualHost *:80>
+ServerName owncloud2.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+## END SHIRAYUKI CONFIURATION
+#
+
+
+
+#
+## HATSUYUKI CONFIGURATION
+elif [ $DEVHOSTNAME == 'hatsuyuki' ]; then
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web
+<VirtualHost *:80>
+ServerName web3.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud
+<VirtualHost *:80>
+ServerName owncloud3.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+## END HATSUYUKI CONFIURATION
+#
+
+
+
+#
+## MURAKUMO CONFIGURATION
+elif [ $DEVHOSTNAME == 'murakumo' ]; then
+
+# Web HTTP
+cat <<'EOF' > /etc/apache2/sites-available/10-http-web
+<VirtualHost *:80>
+ServerName web4.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/web
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+# ownCloud HTTP
+cat <<'EOF' > /etc/apache2/sites-available/11-http-owncloud
+<VirtualHost *:80>
+ServerName owncloud4.arm.taypc6.com
+
+ServerAdmin taylor@arm.taypc6.com
+DocumentRoot /var/www/owncloud
+
+ErrorLog ${APACHE_LOG_DIR}/owncloud-http-error.log
+CustomLog ${APACHE_LOG_DIR}/owncloud-http-access.log combined
+
+</VirtualHost>
+EOF
+
+## END MURAKUMO CONFIURATION
+#
+
+## From group configuration section
+# Create web directories
+mkdir -p /var/www/web
+mkdir -p /var/www/owncloud
+mkdir -p /srv/www/owncloud-data
+chown www-data:www-data /var/www/web
+chown www-data:www-data /var/www/owncloud
+chown www-data:www-data /srv/www/owncloud-data
+
+# Add NFS mounts
+cat <<'EOF' >> /etc/fstab
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud /var/www/owncloud nfs rsize=8192,wsize=8192,timeo=14,intr
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud-data /srv/www/owncloud-data nfs rsize=8192,wsize=8192,timeo=14,intr
+sleipnir.arm.taypc6.com:/srv/gluster/gv0/web /srv/www/web nfs rsize=8192,wsize=8192,timeo=14,intr
+EOF
+
+# Mount directories
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/web
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud
+mount sleipnir.arm.taypc6.com:/srv/gluster/gv0/owncloud-data
+
+# Enable Web Sites
+a2ensite 10-http-web.conf 11-http-owncloud.conf
+\end{lstlisting}
+
+\subsection{Software Bugs and Issues}
+\label{subsec:issues}
+
+The two Debian derivatives that I was using had a few critical flaws with them that need to be fixed before they could be used in a data center environment, and while Raspbian isn’t without its flaws, it is closer to the end goal than Armbian. This is a small sampling of the issues that are common with the operating systems of these devices.
+
+\subsubsection{Allwinner H3 MAC Address Randomization}
+\label{subsubsec:allwinner-mac}
+
+The Orange Pi and NanoPi line of products do not have a firmware-based MAC address. For some reason, the address is instead linked to the kernel. Whenever Armbian releases a kernel update, the MAC address of the Ethernet interface changes. This becomes a critical issue in Section \ref{subsec:script}. In short, the automated configuration script uses MAC addresses to identify the device. When the hardware MAC changes, a device can no longer be identified.\\
+
+This is an issue across the Orange Pi and NanoPi lineup, with every Allwinner-based device in their inventory having this issue. Since there is no hardware-based MAC, this can lead to issues such as static DHCP leases becoming unused and Layer 2 security measures triggering and blocking the device.\\
+
+The solution is to manually assign a MAC address to an interface, but if and when the operating system needs to be re-flashed, then that option will disappear, negating the efforts taken to remove that issue.
+
+\subsubsection{Allwinner CPU Crashes with Armbian}
+\label{subsubsec:allwinner-crash}
+
+Sometimes, the PINE64, Cubieboard 3, Orange Pi Ones, and the NanoPi Neos will crash on me with no explanation. Usually it’s due to the CPU overheating because of poor thermal limiting or power distribution in Armbian, but other times there is no rhyme or reason to these crashes.\\
+
+This was especially an issue when working with Samba on the Cubieboard 3 for an unrelated project. Under continuous load, and with a fan pointed directly at the CPU, the board still crashed extremely often. Switching to NFS solved this problem, but I never figured out what caused it in the first place.\\
+
+This has been an issue across all of the Armbian devices running on Allwinner-based CPUs. Since Allwinner has a custom kernel, there are numerous issues with integrating that into Debian. Certain fixes are in place, but they aren’t always maintained across all of the platforms that Armbian supports.\\
+
+\subsubsection{Broken Upgrades with Armbian}
+\label{subsubsec:broken-upgrades}
+
+Armbian has a wealth of annoying issues that are technically not critical, but the critical ones break everything. One of these issues is an issue with doing upgrades within Armbian.\\
+
+Armbian updates their kernels often, but their distribution upgrade system is nowhere near perfect. Often, when an operating system is upgraded, either the uBoot bootloader settings weren't changed to reference a new kernel version, or critical programs were overwritten or deleted by newer ones without backwards compatibility. These issues, in combination with Armbian's default-overwrite functions for their custom programs, have broken this project several times over.\\
+
+Performing a version upgrade is usually a bit iffy on a normal system, but Armbian themselves recommend reinstalling over upgrading, due to the broken nature of updates. This can create huge security issues, where a program has to be held back because support for that version of the operating system was discontinued.\\
+
+There have been multiple times that devices have gone for an automated security update and just shut down, or deleted their own bootloader settings. Once, during a mass upgrade, one of the Orange Pis with a single version older operating system, and both Odroid XU4s, which had a brand new and two-version-old operating system respectively, all were rebooted after updates and refused to turn back on.\\
+
+This is an extremely common problem, so much so that the automated scripts on these devices don't run version upgrades simply because they break everything. Armbian is very much not recommended for this kind of workload, with numerous issues that would immediately disqualify it from normal datacenters.
+
+\subsubsection{Conflicting Network Managers with Raspbian}
+\label{subsubsec:dhcpcd5}
+
+On Raspbian, an extra program is installed (dhcpcd5) which takes full control of the IP addressing of all interfaces, ignoring any manual configurations in the “interfaces” file. The solution is to remove the program, but behind that is Network Manager, which has a similar problem, but at least it can be overridden. These issues can make a simple task such as setting an IP address a nightmare.
+
+\subsubsection{Locales Frozen with Raspbian}
+\label{subsubsec:locales}
+
+By default, Raspbian uses en\_GB.UTF8 and a British keymap, which causes issues when attempting to type symbols on Raspbian's console. While SSH isn't affected, it is still a pain when working locally. Changing locales manually doesn't work properly, with errors that certain critical locale variables cannot be assigned. This causes problems later on, but nothing that I have found that breaks the system.
+
+\subsubsection{DRBD Kernel Module Not Available in Armbian}
+\label{subsubsec:drbd-error}
+
+DRBD, or Direct Replica Block Device, is a package to create a RAID 1-like setup over a network. However, because the Armbian kernel is custom, and is not the default Debian kernel, the kernel modules that DRBD requires are not in place and cannot be installed through apt since they are not available for ARMHF.\\
+
+In Section \ref{subsubsec:hot-config} there is detailed setup for GlusterFS and NFS, which is not optimal, because DRBD was not available. The original plan was to use what is recommended by ownCloud, which is DRBD and iSCSI.
+
+\subsubsection{openhpid package broken on Raspbian}
+\label{subsubsec:drupal-error}
+
+When attempting to install Drupal and ownCloud on Raspbian, one of the dependencies, openhpid, would not complete installation due to errors with the installation script. This program is critical to both the Drupal installer, drush, and the ownCloud packages. \\
+
+Since this program is required for installing Drupal and ownCloud, it rendered both web services broken when attempting to upgrade them.
+
+\section{Discussion}
+\label{sec:discussion}
+
+ARM itself may be a relatively cheap and useful platform, but it is fractured. Many of the features and capabilities are split across multiple generations, and the software has done the same.
+
+\subsection{Issues With the system}
+\label{subsec:more-issues}
+
+Normally, the Linux kernel can be cross-compiled with ease, meaning that it can account for many slight variations in the hardware without changing. With ARM devices and their custom-compiled kernels and software, this becomes a larger issue. Standardized ARM platforms do exist, but they are usually in enterprise-grade equipment or include generic drivers that take an ARM system to a crawl.\\
+
+The ARM platform as a whole has made tremendous progress in the last few years, but the devices that are currently out there either use hardware that is barely adequate (see Section \ref{subsubsec:allwinner-mac}) or aren't supported properly on the software side (see Section \ref{subsubsec:broken-upgrades}).\\
+
+The issues that I with these devices would eliminate any ARM system from even being discussed at a business meeting. However, these devices aren't targeted at the business market as servers. They are targeted at developers and embedded systems manufacturers. Anyone that uses these devices is expecting issues and how to conquer them.
+
+\subsection{Disclaimer}
+\label{subsec:disclaimer}
+
+This is also a good time to bring up that these devices were never intended to be servers. Most of them weren't even meant to be desktops, and some don't even have graphics processors, such as the NanoPi Neos. This test was a stress on their capabilities outside of their predefined roles.\\
+
+The other thing being stressed were the operating systems. Raspbian and Armbian are both non-enterprise options, and even lack many of the features of embedded servers. The absence of kernel modules necessary for certain programs as described in Section \ref{subsubsec:drbd-error} can cause confusion and errors with implementation. Along with this, the breaking of certain packages, such as openhpid in Raspbian, discussed in Section \ref{subsubsec:drupal-error}, can cause equal issues. These are issues that should be simple to resolve but haven't been.\\
+
+This brings up another issue. ARM may be an established platform, and it may be global, but because it is so fractured, support for it is quite low. ARM isn't as powerful or as established as Intel's x86, so it doesn't receive the same attention.
+
+\section{Conclusion}
+\label{sec:conclusion}
+
+ARM devices have come a long way since the early devices when the only operating systems that you had to work with were the ones that the individual provider offered. New devices have comparable amounts of RAM and CPU cores to low end desktops and servers at much lower costs. However, they still aren't complete yet. Issues with both the hardware and software are still prevalent, but they show promise for the future. ARM is still in its early stages of use, and any development will help establish it.\\
+
+From my testing though, the mishmash or ARM devices that I had was definitely not a viable platform for hosting a small businesses network. However, some devices such as the Odroid XU4s and Udoo Quads were solid throughout the testing, and with support coming from more established operating systems such as CentOS and SUSE, the future of these devices as small servers looks promising. A test with a unified environment would be more informative than this test proved to be.\\
+
+The other area that should have been tested were enterprise ARM servers such as Cavium's Thunder-X, which is supported by Ubuntu. These would have allowed a more in-depth look at some of the features of ARM, and its comparison to Intel or its virtualization capabilities.\\
+
+Future research that would more accurately show off ARM's capabilities would be to use all one device and operating system and test those systems. Either Raspberry Pis or Cubieboard 3s running CentOS or FreeBSD, or Odroid XU4s running Arch. That would be a true test of the capabilities of these devices.
+
+
+% \begin{figure}
+% \begin{center}
+% \begin{tabular}{c}
+% \includegraphics[height=5.5cm]{mcr3b.eps}
+% \end{tabular}
+% \end{center}
+% \caption {Picture}
+% \label{fig:example}
+% \end{figure}
+
+\appendix
+\acknowledgments 
+I would like to thank Professors Joshua White and Ali Tekeoglu from SUNY Polytechnic Institute for supporting this project and checking my paper. I would also like to thank the SUNY Polytechnic's CSTEP Program, NCS Club, Computer Club, Computer Science Department, and DogNet for providing moral and minor material support. Special thanks goes to Marissa Kitts and Luke Kunz for offering edible assistance (they brought me food).
+
+%%%%% References %%%%%
+
+\bibliography{report}   % bibliography data in report.bib
+\bibliographystyle{spiejour}   % makes bibtex use spiejour.bst
+
+\end{document}
